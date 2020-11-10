@@ -40,7 +40,7 @@
 // --------------------------------------------------------------------
 
 #include <fitsio.h>
-#include <wcslib/wcslib.h>
+#include <wcslib.h>
 #include "gmap.h"
 
 double *h_lons;
