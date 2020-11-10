@@ -4,7 +4,7 @@
 - *Authors:*
 
 ## Introduction
-The current edition provides changes made to the original HCGrid during the first phase of learning，which mainly changes the configuration files and adds deployment instructions（instr.md)
+The current edition provides changes made to the original HCGrid codes during the first phase of learning，which mainly changes the configuration files and adds deployment instructions（instr.md)
 
 ### Community Contribution and Advice
 
