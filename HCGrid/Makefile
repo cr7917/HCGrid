@@ -29,8 +29,8 @@ gmap.o: gmap.cpp
 	$(NVCC) -O3 -ccbin $(CXX) $(NVCC_FLAGS) $(CXX_FLAGS) $(INCLUDE) -o $@ -c $<
 
 gridding.o: gridding.cu
-#	$(NVCC) -O3 -ccbin gcc-5 $(NVCC_FLAGS) --ptxas-options=-v $(CXX_FLAGS) $(INCLUDE) -o $@ -c $<
-	$(NVCC) -O3 -ccbin gcc-5 $(NVCC_FLAGS) $(CXX_FLAGS) $(INCLUDE) -o $@ -c $<
+#	$(NVCC) -O3 -ccbin gcc $(NVCC_FLAGS) --ptxas-options=-v $(CXX_FLAGS) $(INCLUDE) -o $@ -c $<
+	$(NVCC) -O3 -ccbin gcc $(NVCC_FLAGS) $(CXX_FLAGS) $(INCLUDE) -o $@ -c $<
 
 HCGrid.o: HCGrid.cpp
 	$(NVCC) -O3 -ccbin $(CXX) $(NVCC_FLAGS) $(CXX_FLAGS) $(INCLUDE) -o $@ -c $<
