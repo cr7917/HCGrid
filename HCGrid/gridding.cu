@@ -3,40 +3,17 @@
 // title                  :gridding.cu
 // description            :Sort and Gridding process.
 // author                 :
+// last editor            :xuweiyi
 //
-// --------------------------------------------------------------------
-// Copyright (C) 2010+ by Hao Wang, Qi Luo
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-//
-// Note: Some HEALPix related helper functions and convolution algorithm 
-// code are adopted from (HEALPix C++) library (Copyright (C) 2003-2012
-//  Max-Planck-Society; author Martin Reinecke) and Cygrid software 
-// (Copyright (C) 2010+ by Benjamin Winkel, Lars Flöer & Daniel Lenz),
-// respectively.
-// 
-// For more information about HEALPix, see http://healpix.sourceforge.net
-// Healpix_cxx is being developed at the Max-Planck-Institut fuer Astrophysik
-// and financially supported by the Deutsches Zentrum fuer Luft- und Raumfahrt
-// (DLR).
-// 
-// For more information about Cygrid, see https://github.com/bwinkel/cygrid.
-// Cygrid was developed in the framework of the Effelsberg-Bonn H i Survey (EBHIS).
-// 
 // --------------------------------------------------------------------
 
 #include <boost/sort/sort.hpp>
 #include <thrust/sort.h>
 #include "gridding.h"
 using boost::sort::block_indirect_sort;
+
+#define stream_size 4
+cudaStream_t stream[stream_size];
 
 double *d_lons;
 double *d_lats;
@@ -107,7 +84,7 @@ void init_input_with_cpu(const int &sort_param) {
         tempArray[i] = h_lats[V[i].inx];
     }
     swap(h_lats, tempArray);
-    for(int i=0; i < data_shape; ++i){
+    for(int i=0; i < data_shape; ++i){  
         tempArray[i] = h_data[V[i].inx];
     }
     swap(h_data, tempArray);
@@ -142,7 +119,7 @@ void init_input_with_cpu(const int &sort_param) {
 
     // Get runtime
     double iTime6 = cpuSecond();
-    printf("%f, ", (iTime6 - iTime1) * 1000.);
+//    printf("%f, ", (iTime6 - iTime1) * 1000.);
 //    printf("%f, %f, %f\n", (iTime3 - iTime2) * 1000., (iTime5 - iTime4) * 1000., (iTime6 - iTime1) * 1000.);
 }
 
@@ -285,32 +262,30 @@ __global__ void hcgrid (
         double *d_weightscube,
         uint64_t *d_hpx_idx) {
     uint32_t warp_id = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
-    uint32_t thread_id = ((warp_id % d_const_GMaps.block_warp_num) * 32 + threadIdx.x % 32) * d_const_GMaps.factor;
-    if (thread_id < d_const_zyx[1]) {
-        uint32_t left = thread_id;
+    uint32_t tid = ((warp_id % d_const_GMaps.block_warp_num) * 32 + threadIdx.x % 32) * d_const_GMaps.factor;
+    if (tid < d_const_zyx[1]) {
+        uint32_t left = tid;
         uint32_t right = left + d_const_GMaps.factor - 1;
+        //printf("d_const_GMaps.factor=%d\n",d_const_GMaps.factor );
         if (right >= d_const_zyx[1]) {
             right = d_const_zyx[1] - 1;
         }
-        uint32_t step = (warp_id / d_const_GMaps.block_warp_num) * d_const_zyx[1];
-        left = left + step;
-        right = right + step;
+        tid = (warp_id / d_const_GMaps.block_warp_num) * d_const_zyx[1];
+        left = left + tid;
+        right = right + tid;
         double temp_weights[3], temp_data[3], l1[3], b1[3];
-        for (thread_id = left; thread_id <= right; ++thread_id) {
-            temp_weights[thread_id-left] = d_weightscube[thread_id];
-            temp_data[thread_id-left] = d_datacube[thread_id];
-            l1[thread_id-left] = d_xwcs[thread_id] * DEG2RAD;
-            b1[thread_id-left] = d_ywcs[thread_id] * DEG2RAD;
+        for (tid = left; tid <= right; ++tid) {
+            temp_weights[tid-left] = d_weightscube[tid];
+            temp_data[tid-left] = d_datacube[tid];
+            l1[tid-left] = d_xwcs[tid] * DEG2RAD;
+            b1[tid-left] = d_ywcs[tid] * DEG2RAD;
         }
-
         // get northeast ring and southeast ring
-        double disc_theta = HALFPI - b1[0];
-        double disc_phi = l1[0];
+        uint64_t upix = d_ang2pix(HALFPI-b1[0], l1[0]);
+        double disc_theta, disc_phi;
+        d_pix2ang(upix, disc_theta, disc_phi);
         double utheta = disc_theta - d_const_GMaps.disc_size;
-        if (utheta * RAD2DEG < 0){
-            utheta = 0;
-        }
-        uint64_t upix = d_ang2pix(utheta, disc_phi);
+        upix = d_ang2pix(utheta, disc_phi);
         uint64_t uring = d_pix2ring(upix);
         if (uring < d_const_Healpix.firstring){
             uring = d_const_Healpix.firstring;
@@ -334,33 +309,23 @@ __global__ void hcgrid (
             d_pix2ang(startpix, utheta, uphi);
 
             // get lpix and rpix
-            disc_theta = HALFPI - b1[0];
-            disc_phi = l1[0];
+            upix = d_ang2pix(HALFPI-b1[0], l1[0]);
+            d_pix2ang(upix, disc_theta, disc_phi);
             uphi = disc_phi - d_const_GMaps.disc_size;
             uint64_t lpix = d_ang2pix(utheta, uphi);
-            if (disc_theta * RAD2DEG <= NORTH_B || disc_theta * RAD2DEG >= SOUTH_B){
-                lpix = startpix;
-            } else{
-                lpix = lpix;
-            }
             if (!(lpix >= startpix && lpix < startpix+num_pix_in_ring)) {
                 start_int = end_int;
                 continue;
             }
             uphi = disc_phi + d_const_GMaps.disc_size;
             uint64_t rpix = d_ang2pix(utheta, uphi);
-            if (disc_theta * RAD2DEG <= NORTH_B || disc_theta * RAD2DEG >= SOUTH_B){
-                rpix = startpix + num_pix_in_ring - 1;
-            } else{
-                rpix = rpix;
-            }
             if (!(rpix >= startpix && rpix < startpix+num_pix_in_ring)) {
                 start_int = end_int;
                 continue;
             }
 
             // find position of lpix
-            uint32_t upix_idx = searchLastPosLessThan(d_hpx_idx, start_int - 1, end_int, lpix);
+            uint32_t upix_idx = searchLastPosLessThan(d_hpx_idx, start_int, end_int, lpix);
             ++upix_idx;
             if (upix_idx > end_int) {
                 upix_idx = d_const_GMaps.data_shape;
@@ -377,26 +342,28 @@ __global__ void hcgrid (
                 double in_weights = d_weights[upix_idx];
                 double in_data = d_data[upix_idx];
 
-                for (thread_id = left; thread_id <= right; ++thread_id) {
-                    double sdist = true_angular_distance(l1[thread_id-left], b1[thread_id-left], l2, b2) * RAD2DEG;
+                for (tid = left; tid <= right; ++tid) {
+                    double sdist = true_angular_distance(l1[tid-left], b1[tid-left], l2, b2) * RAD2DEG;
                     double sbear = 0.;
                     if (d_const_GMaps.bearing_needed) {
-                        sbear = great_circle_bearing(l1[thread_id-left], b1[thread_id-left], l2, b2);
+                        sbear = great_circle_bearing(l1[tid-left], b1[tid-left], l2, b2);
                     }
                     if (sdist < d_const_GMaps.sphere_radius) {
                         double sweight = kernel_func_ptr(sdist, sbear);
                         double tweight = in_weights * sweight;
-                        temp_data[thread_id-left] += in_data * tweight;
-                        temp_weights[thread_id-left] += tweight;
+                        temp_data[tid-left] += in_data * tweight;
+                        temp_weights[tid-left] += tweight;
                     }
-                    d_datacube[thread_id] = temp_data[thread_id - left];
-                    d_weightscube[thread_id] = temp_weights[thread_id - left];
                 }
                 ++upix_idx;
             }
 
             start_int = end_int;
             ++uring;
+        }
+        for (tid = left; tid <= right; ++tid) {
+            d_datacube[tid] = temp_data[tid-left];
+            d_weightscube[tid] = temp_weights[tid-left];
         }
     }
     __syncthreads();
@@ -422,22 +389,33 @@ void data_alloc(){
 }
 
 /* Send data from CPU to GPU. */
-void data_h2d(){
-    uint32_t data_shape = h_GMaps.data_shape;
-    uint32_t num = h_zyx[0] * h_zyx[1] * h_zyx[2];
-    uint32_t usedrings = h_Healpix.usedrings;
-
+void data_h2d(uint32_t index){
+    uint32_t data_shape = h_GMaps.data_shape/stream_size;
+    uint32_t num = h_zyx[0] * h_zyx[1] * h_zyx[2]/stream_size;
+    uint32_t off1 = data_shape * (stream_size-1-index);
+    uint32_t off2 = num * index;
+    
+    uint32_t expand = num / 10;
+    if(index == 0){
+        num+=expand;
+    }else if(index == stream_size-1){
+        num+=expand;
+        off2-=expand;
+    }else{
+        num=num+2*expand;
+        off2-=expand;
+    }
+    printf("off2:%d,num:%d\n",off2,num);
     // Copy constants memory
-    HANDLE_ERROR(cudaMemcpy(d_lons, h_lons, sizeof(double)*data_shape, cudaMemcpyHostToDevice));
-    HANDLE_ERROR(cudaMemcpy(d_lats, h_lats, sizeof(double)*data_shape, cudaMemcpyHostToDevice));
-    HANDLE_ERROR(cudaMemcpy(d_data, h_data, sizeof(double)*data_shape, cudaMemcpyHostToDevice));
-    HANDLE_ERROR(cudaMemcpy(d_weights, h_weights, sizeof(double)*data_shape, cudaMemcpyHostToDevice));
-    HANDLE_ERROR(cudaMemcpy(d_xwcs, h_xwcs, sizeof(double)*num, cudaMemcpyHostToDevice));
-    HANDLE_ERROR(cudaMemcpy(d_ywcs,h_ywcs, sizeof(double)*num, cudaMemcpyHostToDevice));
-    HANDLE_ERROR(cudaMemcpy(d_datacube, h_datacube, sizeof(double)*num, cudaMemcpyHostToDevice));
-    HANDLE_ERROR(cudaMemcpy(d_weightscube, h_weightscube, sizeof(double)*num, cudaMemcpyHostToDevice));
-    HANDLE_ERROR(cudaMemcpy(d_hpx_idx, h_hpx_idx, sizeof(uint64_t)*(data_shape+1), cudaMemcpyHostToDevice));
-    HANDLE_ERROR(cudaMemcpy(d_start_ring, h_start_ring, sizeof(uint32_t)*(usedrings+1), cudaMemcpyHostToDevice));
+    HANDLE_ERROR(cudaMemcpyAsync(d_lons+off1, h_lons+off1, sizeof(double)*data_shape, cudaMemcpyHostToDevice,stream[index]));
+    HANDLE_ERROR(cudaMemcpyAsync(d_lats+off1, h_lats+off1, sizeof(double)*data_shape, cudaMemcpyHostToDevice,stream[index]));
+    HANDLE_ERROR(cudaMemcpyAsync(d_data+off1, h_data+off1, sizeof(double)*data_shape, cudaMemcpyHostToDevice,stream[index]));
+    HANDLE_ERROR(cudaMemcpyAsync(d_weights+off1, h_weights+off1, sizeof(double)*data_shape, cudaMemcpyHostToDevice,stream[index]));
+    HANDLE_ERROR(cudaMemcpyAsync(d_xwcs+off2, h_xwcs+off2, sizeof(double)*num, cudaMemcpyHostToDevice,stream[index]));
+    HANDLE_ERROR(cudaMemcpyAsync(d_ywcs+off2,h_ywcs+off2, sizeof(double)*num, cudaMemcpyHostToDevice,stream[index]));
+    HANDLE_ERROR(cudaMemcpyAsync(d_datacube+off2, h_datacube+off2, sizeof(double)*num, cudaMemcpyHostToDevice,stream[index]));
+    HANDLE_ERROR(cudaMemcpyAsync(d_weightscube+off2, h_weightscube+off2, sizeof(double)*num, cudaMemcpyHostToDevice,stream[index]));
+    HANDLE_ERROR(cudaMemcpyAsync(d_hpx_idx+off1, h_hpx_idx+off1, sizeof(uint64_t)*(data_shape+1), cudaMemcpyHostToDevice,stream[index]));
     HANDLE_ERROR(cudaMemcpyToSymbol(d_const_kernel_params, h_kernel_params, sizeof(double)*3));
     HANDLE_ERROR(cudaMemcpyToSymbol(d_const_zyx, h_zyx, sizeof(uint32_t)*3));
     HANDLE_ERROR(cudaMemcpyToSymbol(d_const_Healpix, &h_Healpix, sizeof(Healpix)));
@@ -445,10 +423,11 @@ void data_h2d(){
 }
 
 /* Send data from GPU to CPU. */
-void data_d2h(){
-    uint32_t num = h_zyx[0] * h_zyx[1] * h_zyx[2];
-    HANDLE_ERROR(cudaMemcpy(h_datacube, d_datacube, sizeof(double)*num, cudaMemcpyDeviceToHost));
-    HANDLE_ERROR(cudaMemcpy(h_weightscube, d_weightscube, sizeof(double)*num, cudaMemcpyDeviceToHost));
+void data_d2h(uint32_t index){
+    uint32_t num = h_zyx[0] * h_zyx[1] * h_zyx[2]/stream_size;
+    uint32_t offset = num * index;
+    HANDLE_ERROR(cudaMemcpyAsync(h_datacube+offset, d_datacube+offset, sizeof(double)*num, cudaMemcpyDeviceToHost,stream[index]));
+    HANDLE_ERROR(cudaMemcpyAsync(h_weightscube+offset, d_weightscube+offset, sizeof(double)*num, cudaMemcpyDeviceToHost,stream[index]));
 }
 
 /* Release data. */
@@ -508,33 +487,43 @@ void solve_gridding(const char *infile, const char *tarfile, const char *outfile
     data_alloc();
 
     double iTime4 = cpuSecond();
-    // Send data from CPU to GPU.
-    data_h2d();
-    printf("h_zyx[1]=%d, h_zyx[2]=%d, ", h_zyx[1], h_zyx[2]);
 
     // Set block and thread.
     dim3 block(bDim);
     dim3 grid((h_GMaps.block_warp_num * h_zyx[1] - 1) / (block.x / 32) + 1);
     printf("grid.x=%d, block.x=%d, ", grid.x, block.x);
+    printf("h_zyx[1]=%d, h_zyx[2]=%d, data_shape=%d, data_spec=%d,sphere_radius=%f\n", h_zyx[1], h_zyx[2], h_GMaps.data_shape, h_GMaps.spec_dim,h_GMaps.sphere_radius);
+    
+    //create stream
+    for(int i=0;i<stream_size;i++){
+        cudaStreamCreate(&stream[i]);
+    }
+    
+    //HANDLE_ERROR(cudaMemcpy(d_hpx_idx, h_hpx_idx, sizeof(uint64_t)*(h_GMaps.data_shape+1), cudaMemcpyHostToDevice));
+    HANDLE_ERROR(cudaMemcpy(d_start_ring, h_start_ring, sizeof(uint32_t)*(h_Healpix.usedrings+1), cudaMemcpyHostToDevice));
+    //HANDLE_ERROR(cudaMemcpy(d_lons, h_lons, sizeof(double)*h_GMaps.data_shape, cudaMemcpyHostToDevice));
+    //HANDLE_ERROR(cudaMemcpy(d_lats, h_lats, sizeof(double)*h_GMaps.data_shape, cudaMemcpyHostToDevice));
+    //HANDLE_ERROR(cudaMemcpy(d_data, h_data, sizeof(double)*h_GMaps.data_shape, cudaMemcpyHostToDevice));
+    //HANDLE_ERROR(cudaMemcpy(d_weights, h_weights, sizeof(double)*h_GMaps.data_shape, cudaMemcpyHostToDevice));
+    //cuda stream
+    for(uint32_t i=0;i<stream_size;i++){
 
-    // Get start time.
-    cudaEvent_t start, stop;
-    HANDLE_ERROR(cudaEventCreate(&start));
-    HANDLE_ERROR(cudaEventCreate(&stop));
-    HANDLE_ERROR(cudaEventRecord(start, 0));
+        //host to device
+        printf("start stream %d\n",i);
+        data_h2d(i);
+        //kernel
+        hcgrid<<< grid, block, 0, stream[i] >>>(d_lons, d_lats, d_data, d_weights, d_xwcs, d_ywcs, d_datacube, d_weightscube, d_hpx_idx);
+        //device to host
+        data_d2h(i);
+        printf("end stream %d\n",i);
 
-    // Call device kernel.
-    hcgrid<<< grid, block >>>(d_lons, d_lats, d_data, d_weights, d_xwcs, d_ywcs, d_datacube, d_weightscube, d_hpx_idx);
+    }
+    cudaDeviceSynchronize();
 
-    // Get stop time.
-    HANDLE_ERROR(cudaEventRecord(stop, 0));
-    HANDLE_ERROR(cudaEventSynchronize(stop));
-    float elapsedTime;
-    HANDLE_ERROR(cudaEventElapsedTime(&elapsedTime, start, stop));
-    printf("kernel elapsed time=%f, ", elapsedTime);
-
-    // Send data from GPU to CPU
-    data_d2h();
+    //destroy stream
+    for(int i=0;i<stream_size;i++){
+        cudaStreamDestroy(stream[i]);
+    }
 
     // Write output FITS file
     write_output_map(outfile);
@@ -546,8 +535,6 @@ void solve_gridding(const char *infile, const char *tarfile, const char *outfile
 
     // Release data
     data_free();
-    HANDLE_ERROR( cudaEventDestroy(start) );
-    HANDLE_ERROR( cudaEventDestroy(stop) );
     HANDLE_ERROR( cudaDeviceReset() );
 
     double iTime5 = cpuSecond();
